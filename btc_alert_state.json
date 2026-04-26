@@ -1,3 +1,6 @@
 {
-  "786550.00000000_usd": "buy_more"
+  "786550.00000000_usd": {
+    "last_up_step": 0,
+    "last_down_step": 90
+  }
 }
