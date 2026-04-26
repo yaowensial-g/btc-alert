@@ -1,0 +1,61 @@
+name: BTC Alert
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      buy_price:
+        description: "BTC buy price"
+        required: false
+      currency:
+        description: "Currency code, for example usd"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  check-price:
+    runs-on: ubuntu-latest
+    env:
+      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      BTC_BUY_PRICE: ${{ inputs.buy_price || secrets.BTC_BUY_PRICE }}
+      BTC_CURRENCY: ${{ inputs.currency || vars.BTC_CURRENCY || 'usd' }}
+    steps:
+      - name: Check configuration
+        run: |
+          if [ -z "$PUSHPLUS_TOKEN" ]; then
+            echo "Missing secret: PUSHPLUS_TOKEN"
+            exit 1
+          fi
+          if [ -z "$BTC_BUY_PRICE" ]; then
+            echo "Missing secret or input: BTC_BUY_PRICE"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run BTC alert check
+        run: python btc_alert.py "$BTC_BUY_PRICE" --once --currency "$BTC_CURRENCY"
+
+      - name: Commit state file if changed
+        run: |
+          if git diff --quiet -- btc_alert_state.json; then
+            echo "No state change."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add btc_alert_state.json
+          git commit -m "Update BTC alert state"
+          git push
