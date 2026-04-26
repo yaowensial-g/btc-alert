@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -27,81 +28,112 @@ def save_state(state):
     )
 
 
-def get_signal(current_price, buy_price):
-    change_ratio = (current_price - buy_price) / buy_price
-
-    if change_ratio >= 0.20:
-        return "sell", change_ratio
-    if change_ratio <= -0.20:
-        return "buy_more", change_ratio
-    return "hold", change_ratio
+def get_percent_steps(change_ratio):
+    up_step = max(0, math.floor(change_ratio * 100))
+    down_step = max(0, math.floor(-change_ratio * 100))
+    return up_step, down_step
 
 
-def build_message(current_price, buy_price, change_ratio, currency, signal):
-    change_percent = change_ratio * 100
-
-    if signal == "sell":
-        title = "BTC sell alert"
+def build_message(current_price, buy_price, currency, direction, percent_step):
+    if direction == "up":
+        title = f"BTC up {percent_step}% alert"
         content = (
             f"Current BTC price: {current_price:.2f} {currency.upper()}\n"
             f"Buy price: {buy_price:.2f} {currency.upper()}\n"
-            f"Change: {change_percent:.2f}%\n"
-            "Price is up at least 20%. Consider taking profit."
+            f"Change: +{percent_step}% or more\n"
+            f"BTC has reached at least {percent_step}% above your buy price."
         )
         return title, content
 
-    if signal == "buy_more":
-        title = "BTC buy-more alert"
-        content = (
-            f"Current BTC price: {current_price:.2f} {currency.upper()}\n"
-            f"Buy price: {buy_price:.2f} {currency.upper()}\n"
-            f"Change: {change_percent:.2f}%\n"
-            "Price is down at least 20%. Consider adding to your position."
-        )
-        return title, content
+    title = f"BTC down {percent_step}% alert"
+    content = (
+        f"Current BTC price: {current_price:.2f} {currency.upper()}\n"
+        f"Buy price: {buy_price:.2f} {currency.upper()}\n"
+        f"Change: -{percent_step}% or more\n"
+        f"BTC has reached at least {percent_step}% below your buy price."
+    )
+    return title, content
 
-    return None, None
+
+def send_step_alerts(current_price, buy_price, currency, direction, start_step, end_step):
+    last_successful_step = start_step
+
+    for percent_step in range(start_step + 1, end_step + 1):
+        title, content = build_message(
+            current_price=current_price,
+            buy_price=buy_price,
+            currency=currency,
+            direction=direction,
+            percent_step=percent_step,
+        )
+        success = pushplus_send(title, content)
+        print(
+            f"Sent {direction} {percent_step}% alert."
+            if success
+            else f"Failed to send {direction} {percent_step}% alert."
+        )
+        if not success:
+            break
+        last_successful_step = percent_step
+
+    return last_successful_step
 
 
 def check_and_notify(buy_price, currency):
     current_price = get_btc_price(currency)
-    signal, change_ratio = get_signal(current_price, buy_price)
+    change_ratio = (current_price - buy_price) / buy_price
+    current_change_percent = change_ratio * 100
+    current_up_step, current_down_step = get_percent_steps(change_ratio)
 
     state = load_state()
     state_key = f"{buy_price:.8f}_{currency.lower()}"
-    last_signal = state.get(state_key, "hold")
+    state_entry = state.get(state_key, {"last_up_step": 0, "last_down_step": 0})
+    if not isinstance(state_entry, dict):
+        state_entry = {"last_up_step": 0, "last_down_step": 0}
+    last_up_step = int(state_entry.get("last_up_step", 0))
+    last_down_step = int(state_entry.get("last_down_step", 0))
 
     print(
         f"Current BTC price: {current_price:.2f} {currency.upper()}, "
         f"buy price: {buy_price:.2f} {currency.upper()}, "
-        f"change: {change_ratio * 100:.2f}%"
+        f"change: {current_change_percent:.2f}%"
     )
 
-    if signal in {"sell", "buy_more"} and signal != last_signal:
-        title, content = build_message(
+    updated = False
+
+    if current_up_step > last_up_step:
+        state_entry["last_up_step"] = send_step_alerts(
             current_price=current_price,
             buy_price=buy_price,
-            change_ratio=change_ratio,
             currency=currency,
-            signal=signal,
+            direction="up",
+            start_step=last_up_step,
+            end_step=current_up_step,
         )
-        success = pushplus_send(title, content)
-        print("Push sent successfully." if success else "Push failed.")
-        if success:
-            state[state_key] = signal
-            save_state(state)
-        return
+        updated = state_entry["last_up_step"] != last_up_step
 
-    if signal == "hold" and last_signal != "hold":
-        state[state_key] = "hold"
+    if current_down_step > last_down_step:
+        state_entry["last_down_step"] = send_step_alerts(
+            current_price=current_price,
+            buy_price=buy_price,
+            currency=currency,
+            direction="down",
+            start_step=last_down_step,
+            end_step=current_down_step,
+        )
+        updated = updated or state_entry["last_down_step"] != last_down_step
+
+    if updated:
+        state[state_key] = state_entry
         save_state(state)
+        return
 
     print("No new alert needed.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Monitor BTC price and send a push alert at +/-20%."
+        description="Monitor BTC price and send a push alert every 1% move from buy price."
     )
     parser.add_argument("buy_price", type=float, help="Your initial BTC buy price.")
     parser.add_argument(
